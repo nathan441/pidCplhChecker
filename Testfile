@@ -1,0 +1,1281 @@
+// ==UserScript==
+// @name         nIXD PPR Summary
+// @version      1.16
+// @description  Display nIXD Metrics in on the PPR!
+// @author       bbunks
+// @match        https://fclm-portal.amazon.com/reports/processPathRollup?**
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
+// @grant        GM.xmlHttpRequest
+// @require      https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js
+// @downloadURL  https://axzile.corp.amazon.com/-/carthamus/download_script/ppr-1to1.user.js
+// @updateURL    https://axzile.corp.amazon.com/-/carthamus/download_script/ppr-1to1.user.js
+// @download
+// ==/UserScript==
+
+(async function () {
+    'use strict';
+
+    const GLOBALS = {
+        VERSION: '1.16'
+    }
+
+    function gmFetch(url) {
+        return new Promise((resolve, reject) => {
+            GM.xmlHttpRequest({
+                method: "GET",
+                url,
+                onload: (res) => resolve(res),
+                onerror: (err) => reject(err)
+            });
+        });
+    }
+
+    var css = document.createElement("style");
+    css.innerHTML += `.section-header {
+	border: 1px solid #fff;
+	background-color: #d0dafd;
+	color: #000;
+	text-align: left;
+	font-weight: bold;
+	padding: 1rem;
+	white-space: nowrap;
+    align-self: stretch;
+}
+
+.divider {
+	text-align: center !important;
+	font-size: .75em !important;
+	background-color: #55F !important;
+	color: white !important;
+}
+
+.section {
+	border: 1px solid #d0dafd;
+    display: flex;
+    align-items: start;
+    padding: 8px;
+    gap: 8px;
+	height: 100%;
+	box-sizing: border-box;
+    justify-content: center;
+    background-color: #f9f9f9;
+}
+
+.section h3 {
+	font-size: 1rem;
+	margin: 0;
+    padding: .5rem;
+    background-color: white;
+}
+    
+.bItem {
+	padding: 0 .3rem 0 1rem;
+}
+    
+.bLabel {
+	padding: 0 .3rem;
+    white-space: nowrap !important;
+}
+    
+.goalInput {
+	width: 2em;
+	text-align: right;
+	padding: .5px;
+	border: none;
+	border-bottom: solid 1px;
+	font-size: 11px;
+}
+
+.bTable {
+    border: 2px solid #d0dafd;
+    display: flex;
+    flex-direction: column;
+}
+    
+.tableFootNote {
+	font-size: .6em;
+    align-self: end;
+    padding: 2px;
+}
+    
+.parentDiv {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    box-sizing: border-box;
+    border: 1px solid #d0dafd;
+    width: min-content;
+    margin: auto;
+    position: relative;
+}
+    
+.parentDiv .section-header {
+    border: none !important;
+    display: flex;
+    padding: 0.5rem;
+    justify-content: center;
+    align-items: center;
+    writing-mode: sideways-lr;
+}
+
+.headerDiv {
+    display: flex;
+    justify-content: space-around;
+    grid-column: 1 / span 2;
+	background-color: #55F;
+	color: white;
+    margin: -1px;
+    margin-bottom: -2px;
+    z-index: 10;
+}
+
+.headerDiv h1 {
+    margin: 0;
+    padding: 0;
+}
+
+.headerDiv a, .parentFooter a {
+    color: white;
+}
+
+.headerSection {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+    padding: 1rem;
+}
+    
+.parentFooter {
+    display: flex;
+    justify-content: space-between;
+    grid-column: 1 / span 2;
+	background-color: #55F;
+	color: white;
+    margin: -1px;
+    margin-top: -2px;
+}
+    
+.footerSection {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .5rem;
+}
+    
+.footerSection p {
+    margin: 0;
+}
+    
+#versionConatiner {
+    display: flex;
+    gap: .5rem;
+}`;
+
+    document.querySelector("head").appendChild(css);
+    // Create a URLSearchParams object from the query string
+    const params = new URLSearchParams(window.location.search);
+    const debug = params.get("debug");
+    params.set("reportFormat", "CSV")
+    params.delete("processId")
+
+    // setup date range
+    // Day, Week, Month, Intraday
+    let startDate, endDate, iGraphDuration;
+    const dateSpan = params.get("spanType")
+
+    function parseDate(dateString) {
+        // Split the date (e.g., "2025/01/28") into year, month, and day
+        const [year, month, day] = dateString.split('/').map(num => parseInt(num, 10));
+
+        return new Date(year, month - 1, day);
+    }
+
+    switch (dateSpan) {
+        case "Day":
+            startDate = parseDate(params.get("startDateDay"));
+            endDate = new Date(startDate);
+            endDate.setDate(endDate.getDate() + 1)
+            iGraphDuration = 'OneHour'
+            break;
+        case "Week":
+            startDate = parseDate(params.get("startDateWeek"));
+            endDate = new Date(startDate);
+            endDate.setDate(endDate.getDate() + 7)
+            iGraphDuration = 'OneHour'
+            break;
+        case "Month":
+            startDate = parseDate(params.get("startDateMonth"));
+            endDate = new Date(startDate);
+            // Overflows to the first day of the next month
+            endDate.setDate(32)
+            endDate.setHours(0, 0, 0, 0);
+            iGraphDuration = 'OneDay'
+            break;
+        case "Intraday":
+            startDate = parseDate(params.get("startDateIntraday"));
+            const startHour = parseInt(params.get('startHourIntraday'));
+            const startMinute = parseInt(params.get('startMinuteIntraday'));
+            startDate.setHours(startHour, startMinute, 0, 0);
+            endDate = parseDate(params.get("endDateIntraday"));
+            const endHour = parseInt(params.get('endHourIntraday'));
+            const endMinute = parseInt(params.get('endMinuteIntraday'));
+            endDate.setHours(endHour, endMinute, 0, 0);
+            iGraphDuration = 'OneMinute'
+            break;
+        default:
+            startDate = new Date();
+            startDate.setHours(0, 0, 0, 0);
+            endDate = new Date()
+            endDate.setDate(startDate.getDate() + 1)
+            endDate.setHours(0, 0, 0, 0);
+            iGraphDuration = 'OneHour'
+            break;
+    }
+
+    const lastUpdateTimeElement = document.querySelector('div[id="timestamps"]>div[class="resourceDrilldownLink"]>div>strong')
+    const TOTEndDate = endDate
+    if (lastUpdateTimeElement) {
+        const lastUpdateTime = new Date(lastUpdateTimeElement.textContent.replace(' PDT', ''))
+        if (endDate > lastUpdateTime && startDate < lastUpdateTime) endDate = lastUpdateTime
+    }
+    if (debug) console.log(startDate, endDate)
+
+    const site = params.get('warehouseId');
+
+    const SQL = await initSqlJs({
+        // Required to load the wasm binary asynchronously. Of course, you can host it wherever you want
+        // You can omit locateFile completely when running in node
+        locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
+    });
+    const db = new SQL.Database();
+
+    if (debug) console.log(db);
+
+    window.addEventListener('unload', () => {
+        if (db) {
+            db.close();
+        }
+    });
+
+    function parseCSV(csvText) {
+        const regex = /(".*?"|[^",\n]+)(?=\s*,|\s*\n|\s*$)/g;  // Regex to handle quoted values
+
+        const rows = csvText.replaceAll(",,", ',0,').trim().split('\n').map((row, i) => {
+            const columns = [];
+            let match;
+            while ((match = regex.exec(row)) !== null) {
+                // Remove quotes around values and handle commas inside quotes
+                columns.push(match[0].replace(/^"|"$/g, ''));
+            }
+
+            return columns;
+        });
+        return rows;
+    }
+
+
+    async function fetchAndParseFCLMcsv(url) {
+        if (debug) console.time(url)
+
+        // Fetch the CSV file from the provided URL
+        let response;
+        let attemptCount = 0;
+        while (++attemptCount < 3 && !(response && response.ok)) {
+            response = await fetch(url);
+            if (!response.ok && debug) console.log("trying again", url)
+        }
+        if (!response.ok) console.error("Failed to fetch", url)
+        const csvText = await response.text();
+        if (debug) console.timeEnd(url)
+
+        // Parse CSV into an array of objects
+        try {
+            const rows = parseCSV(csvText);
+            return rows;
+        } catch (e) {
+            console.error(e)
+        }
+
+    }
+
+    async function fetchAndParseIGraphCSV(url) {
+
+        if (debug) console.time(url)
+        let response;
+        let attemptCount = 0;
+        while (attemptCount++ < 10 && !(response && response.ok)) {
+            try {
+                // Fetch the CSV file from the provided URL
+                response = await gmFetch(url);
+
+                const csvText = response.responseText;
+
+                // Parse CSV into an array of objects
+                const rows = parseCSV(csvText);
+
+                if (debug) console.timeEnd(url)
+                return rows.filter((ele, i) => i !== 0 && !(i >= 2 && i <= 5)).map((ele, i) => {
+                    if (i === 0) {
+                        return [...ele, "timespan"]
+                    } else {
+                        return [...ele, iGraphDuration]
+                    }
+                });
+            } catch {
+                if (debug) console.log("retrying", url)
+            }
+        }
+        console.error("Could not fetch...")
+        if (debug) console.timeEnd(url)
+    }
+
+
+    function toObject(rows) {
+        // Assuming first row is headers
+        const headers = rows[0];
+        const data = rows.slice(1).map(row => {
+            return headers.reduce((obj, header, index) => {
+                obj[header] = row[index];
+                return obj;
+            }, {});
+        });
+
+        return data
+    }
+
+    function csvToSql(csvData, tableName, columnTypes = [], defaultType = 'TEXT') {
+        const headers = csvData[0];
+        let valueLength = columnTypes.length;
+        if (valueLength < headers.length) {
+            valueLength = headers.length;
+        }
+
+        let createTableSql = `CREATE TABLE IF NOT EXISTS ${tableName} (`;
+        headers.forEach((header, index) => {
+            const type = columnTypes[index] || defaultType;
+            createTableSql += `'${header.trim()}' ${type}`;
+            if (index < headers.length - 1) createTableSql += ', ';
+        });
+        createTableSql += ');';
+
+        db.run(createTableSql)
+
+        const query = `INSERT INTO ${tableName} VALUES (${"?,".repeat(valueLength).slice(0, -1)})`
+        csvData.slice(1).forEach(row => {
+            const values = row.map(value => value.trim()); // Handle values with quotes or commas
+            try {
+                db.run(query, values);
+            } catch (error) {
+                console.log(error)
+            }
+        });
+    }
+
+    // Build the department Lookup Table
+    csvToSql([
+        ["Management Area ID", "Management Area", "Department"],
+        ["1", "Vendor Receive", "Inbound"],
+        ["2", "Receive Dock", "Inbound"],
+        ["3", "Inbound Stow", "Inbound"],
+        ["4", "Replen", "Inbound"],
+        ["5", "IB Lead/PA", "Inbound"],
+        ["6", "IB Problem Solve", "Inbound"],
+        ["36", "IB Prep", "Inbound"],
+        ["13", "Picking", "Outbound"],
+        ["14", "Sort - Flow", "Outbound"],
+        ["15", "Sort - Batch", "Outbound"],
+        ["16", "Pack - Flow", "Outbound"],
+        ["17", "Pack - Batch", "Outbound"],
+        ["18", "Pack - Single", "Outbound"],
+        ["19", "OB Lead/PA", "Outbound"],
+        ["20", "OB Problem Solve", "Outbound"],
+        ["21", "Ship Dock", "Outbound"],
+        ["35", "GiftWrap", "Outbound"],
+        ["40", "Pack Custom", "Outbound"],
+        ["26", "Admin/HR/IT", "Support"],
+        ["27", "IC/QA/CS", "Support"],
+        ["28", "Facilities", "Support"],
+        ["33", "Training", "Support"],
+        ["34", "Safety", "Support"],
+        ["7", "TO Dock", "DA"],
+        ["8", "RC Picking", "DA"],
+        ["9", "RC Sort", "DA"],
+        ["10", "Transfer Out", "DA"],
+        ["11", "TO Lead/PA", "DA"],
+        ["12", "TO Problem Solve", "DA"],
+        ["22", "Customer Returns", "Customer Returns"],
+        ["32", "Warehouse Deals", "Warehouse Deals"],
+        ["24", "Vendor Returns", "Vendor Returns"],
+        ["39", "Kindle Diagnostics", "Kindle Diagnostics"],
+        ["25", "Make On Demand", "MOD"],
+        ["23", "Print on Demand", "MOD"],
+        ["29", "Amtran In", "Sort Center"],
+        ["30", "Amtran Sortation", "Sort Center"],
+        ["31", "Amtran Out", "Sort Center"],
+        ["38", "Trade-In", "Trade-In"],
+        ["37", "Trade-In Support", "Trade-In"]
+    ],
+        "DepartmentLookup",
+        ["INTEGER", "TEXT", "TEXT"]
+    )
+
+
+    const HappyPathCasesURL = `https://monitorportal.amazon.com/mws?Action=GetGraph&Version=2007-07-07&SchemaName1=Search&Pattern1=dataset%3D%24Prod%24%20marketplace%3D%24${site}%24%20hostgroup%3D%24ALL%24%20host%3D%24ALL%24%20servicename%3D%24FCContainerRoutingService%24%20methodname%3D%24ALL%24%20client%3D%24ALL%24%20metricclass%3D%24NONE%24%20instance%3D%24NONE%24%20schemaname%3DService%20metric%3D%24pkTRANSCase&Period1=${iGraphDuration}&Stat1=sum&HeightInPixels=250&WidthInPixels=600&GraphTitle=OB%20${site}%20Cases&DecoratePoints=true&GraphType=pie&StartTime1=${startDate.toISOString()}&EndTime1=${endDate.toISOString()}&FunctionExpression1=SUM%28S1%29&FunctionLabel1=Total&FunctionYAxisPreference1=left&OutputFormat=CSV_TRANSPOSE`
+    const ReceivedCartonsURL = `https://monitorportal.amazon.com/mws?Action=GetGraph&Version=2007-07-07&SchemaName1=Service&DataSet1=Prod&Marketplace1=${site}&HostGroup1=ALL&Host1=ALL&ServiceName1=AFTCartonDataService&MethodName1=CreateCartonFromFreightLabel&Client1=ALL&MetricClass1=NONE&Instance1=NONE&Metric1=CartonEventPublish.Created&Period1=OneMinute&Stat1=sum&LiveData1=true&Label1=Manual%20Cartons&UserLabel1=Manual%20Cartons&SchemaName2=Service&ServiceName2=AFTInboundDirectorService&MethodName2=PendingCartonLockSQSConsumer&MetricClass2=HANDSCANNER&Instance2=ALL&Metric2=FirstPerformanceForCarton&Label2=cPrEditor%20NVF%20A&UserLabel2=cPrEditor%20NVF%20A&SchemaName3=Service&MetricClass3=UNKNOWN&Label3=cPrEditor%20NVF%20B&UserLabel3=cPrEditor%20NVF%20B&SchemaName4=Service&MetricClass4=AROS&Label4=AROS%20NVF&UserLabel4=AROS%20NVF&SchemaName5=Service&MetricClass5=MARS&Label5=MARS%20NVF&UserLabel5=MARS%20NVF&SchemaName6=Service&MetricClass6=HANDSCANNER&Metric6=FirstPerformanceForTransInCarton&Label6=cPrEditor%20TransIn%20A&UserLabel6=cPrEditor%20TransIn%20A&SchemaName7=Service&MetricClass7=UNKNOWN&Label7=cPrEditor%20TransIn%20B&UserLabel7=cPrEditor%20TransIn%20B&SchemaName8=Service&MetricClass8=PID&Label8=PID%20TransIn&UserLabel8=PID%20TransIn&SchemaName9=Service&MetricClass9=AROS&Label9=AROS%20TransIn&UserLabel9=AROS%20TransIn&SchemaName10=Service&MetricClass10=MARS&Label10=MARS%20TransIn&UserLabel10=MARS%20TransIn&SchemaName11=Service&ServiceName11=RodeoEventProcessingService&MethodName11=INSCreateContainer&MetricClass11=NONE&Instance11=NONE&Metric11=InvalidMessage%3AInboundProductionSegment&Label11=PR%20Cartons&UserLabel11=PR%20Cartons&SchemaName12=Service&ServiceName12=AFTInboundDirectorService&MethodName12=PendingCartonLockSQSConsumer&MetricClass12=PID&Instance12=ALL&Metric12=FirstPerformanceForCarton&Label12=PID%20CARTONS&UserLabel12=PID%20CARTONS&HeightInPixels=250&WidthInPixels=600&GraphTitle=${site}%20Combined%20Cartons%20&DecoratePoints=true&GraphType=pie&TZ=PST@TZ%3A%20PST&StartTime1=${startDate.toISOString()}&EndTime1=${endDate.toISOString()}&FunctionExpression1=SUM%28M1%2CM2%2CM3%2CM4%2CM5%2CM6%2CM7%2CM8%2CM9%2CM10%2CM11%2CM12%29&FunctionLabel1=Total&FunctionYAxisPreference1=left&FunctionColor1=default&OutputFormat=CSV_TRANSPOSE`
+    const totesCreatedURL = `https://monitorportal.amazon.com/mws?Action=GetGraph&Version=2007-07-07&SchemaName1=Search&Pattern1=dataset%3D%24Prod%24%20marketplace%3D%24${site}%24%20hostgroup%3D%24ALL%24%20host%3D%24ALL%24%20servicename%3D%24FCContainerRoutingService%24%20methodname%3D%24ALL%24%20client%3D%24ALL%24%20metricclass%3D%24NONE%24%20instance%3D%24NONE%24%20schemaname%3DService%20metric%3D%24pkTRANSTote%20NOT%20metric%3D%28%24pkTRANSTote${site}%3ARouteScannables.UnknownDestination%24%29&Period1=${iGraphDuration}&Stat1=sum&HeightInPixels=250&WidthInPixels=600&GraphTitle=OB%20${site}%20Totes&DecoratePoints=true&GraphType=pie&StartTime1=${startDate.toISOString()}&EndTime1=${endDate.toISOString()}&FunctionExpression1=SUM%28S1%29&FunctionLabel1=Total&FunctionYAxisPreference1=left&OutputFormat=CSV_TRANSPOSE`
+
+    let roster = false
+
+    if (debug) console.time("fetchting")
+
+
+    function sortByPlanType(array) {
+        const planTypeOrder = {
+            'pdp': 0,
+            'psp': 1,
+            'sos': 2
+        };
+
+        return array.sort((a, b) => {
+            // Handle pdp, psp, and sos
+            if (planTypeOrder[a.plan_type] !== undefined && planTypeOrder[b.plan_type] !== undefined) {
+                return planTypeOrder[a.plan_type] - planTypeOrder[b.plan_type];
+            }
+
+            // Handle replan cases
+            if (a.plan_type.startsWith('replan') && b.plan_type.startsWith('replan')) {
+                const replanNumA = parseInt(a.plan_type.replace('replan', ''));
+                const replanNumB = parseInt(b.plan_type.replace('replan', ''));
+                return replanNumA - replanNumB;
+            }
+
+            // Put pdp, psp, sos before replans
+            if (planTypeOrder[a.plan_type] !== undefined) return -1;
+            if (planTypeOrder[b.plan_type] !== undefined) return 1;
+
+            // If neither is pdp, psp, or sos, maintain relative order
+            return 0;
+        });
+    }
+
+    const types = ["TEXT", "TEXT", "TEXT", "INTEGER", "TEXT", "TEXT", "REAL", "REAL", "REAL", "REAL", "REAL", "TEXT", "INTEGER", "REAL", "TEXT", "TEXT", "INTEGER", "REAL"]
+    const functionRollupCodes = ["1002982", "1003023", "1003021", "01003031", "1003047", "1003022", "1003009", "1002960", "01003018"]
+
+    const [plan] = await Promise.all([
+        // Shift Plan Data
+        async function () {
+            if (!(dateSpan === "Intraday" || dateSpan === "Day" || dateSpan === null)) return false;
+            await gmFetch(`https://neo.meta.amazon.dev/sso/login`);
+
+            let rawdate = new Date(endDate)
+
+            const currentTimeInMinutes = (rawdate.getHours() * 60) + rawdate.getMinutes();
+            if (currentTimeInMinutes <= 390) rawdate.setDate(rawdate.getDate() - 1)
+
+            const departmentRes = await gmFetch(`https://neo.meta.amazon.dev/api/dropdown/departments?warehouse_id=${site}`);
+            const department = JSON.parse(departmentRes.responseText)[0];
+
+            // Get Available Shifts (night/day)
+            const shiftsRes = await gmFetch(`https://neo.meta.amazon.dev/api/dropdown/shifts?warehouse_id=${site}&department=${department.replaceAll(" ", "+")}`)
+            const shifts = JSON.parse(shiftsRes.responseText)
+            let shiftTime = shifts[0];
+            // if there is are multiple shifts in a day, check for time. If before 6:30 am or after 6:30 pm
+            // set it to pull the night plan
+            // the time is pulled on current time unless it is looking at an intraday
+            if (shifts.length > 1) {
+                let dateTime = rawdate;
+                if (dateSpan !== "Intraday") dateTime = new Date();
+
+                let t;
+                const currentTimeInMinutes = (dateTime.getHours() * 60) + dateTime.getMinutes();
+                if (currentTimeInMinutes >= 391 && currentTimeInMinutes <= 1110) t = "day"; else t = "night";
+                if (shifts.indexOf(t) >= 0) shiftTime = t;
+            }
+
+            const year = rawdate.getFullYear();
+            const month = String(rawdate.getMonth() + 1).padStart(2, '0');
+            const day = String(rawdate.getDate()).padStart(2, '0');
+            const date = `${year}-${month}-${day}`;
+
+            const shiftRes = await gmFetch(`https://neo.meta.amazon.dev/api/v2/shift?site_id=${site}&shift=${shiftTime}&date=${date}&department=${department.replaceAll(" ", "+")}`);
+            const shift = JSON.parse(shiftRes.responseText)
+
+            const staffingProfileRes = await gmFetch(`https://neo.meta.amazon.dev/api/v2/rules/staffing_profile?site_id=${site}`)
+            const staffingProfile = JSON.parse(staffingProfileRes.responseText)
+
+            const plansRes = await gmFetch(`https://neo.meta.amazon.dev/api/v2/planning/plan?staffing_profile_id=${staffingProfile[0].staffing_profile_id}&shift=${shift.shift_id}`);
+            const plans = JSON.parse(plansRes.responseText)
+            const planInfo = sortByPlanType(plans).toReversed().find(ele => ele.locked)
+
+            if (!planInfo) return false;
+
+            const planRes = await gmFetch(`https://neo.meta.amazon.dev/api/v2/planning/generate_plan?site_id=${site}&shift=${shiftTime}&date=${date}&plan_id=${planInfo.plan_id}&department=${department.replaceAll(" ", "+")}&staffing_profile_id=${staffingProfile[0].staffing_profile_id}&plan_name=${planInfo.plan_type}`)
+
+            const plan = JSON.parse(planRes.responseText)
+
+            // Shift Plans and Goals
+            const shiftPlans = plan.find(ele => ele.title === "Shift Goals").data
+            const assumptions = plan.find(ele => ele.title === "Assumptions").data
+
+            // Big Box and Cartons
+            const bigBox = shiftPlans.find(ele => ele.name === "Big Box").subfunctions
+            const combinedCartons = bigBox.find(ele => ele.name === "Combined Cartons").plan
+
+            // PID Container Density
+            const pidContainer = assumptions.find(ele => ele.name === "PID Container Density").subfunctions
+            const IBDensity = pidContainer.find(ele => ele.name === "LP Receive").plan
+
+            // DA (Distributed Area) Related
+            const da = shiftPlans.find(ele => ele.name === "DA Containers and Units").subfunctions
+            const OBJobs = da.find(ele => ele.name === "Total TO Jobs").plan
+
+            // Sort Commitments
+            const SortCommitment = shiftPlans.find(ele => ele.name === "Sort Commitments").subfunctions
+            const sortPercent = SortCommitment.find(ele => ele.name === "Sort % of Big Box Units").plan
+
+            // Hours Related
+            const inboundHours = assumptions.find(ele => ele.name === "Inbound Hours").subfunctions
+            const daHours = assumptions.find(ele => ele.name === "DA Hours").subfunctions
+            const supportHours = assumptions.find(ele => ele.name === "Support Hours").subfunctions
+            const buildingHours = assumptions.find(ele => ele.name === "Total Building Hours").subfunctions
+
+            const daTotalHours = daHours.find(ele => ele.name === "DA Total Hours").plan
+            const supportTotalHours = supportHours.find(ele => ele.name === "Total Support Hours").plan
+            const inboundTotalHours = inboundHours.find(ele => ele.name === "Inbound Total Hours").plan
+
+            // Building CPLH (Containers Per Labor Hour)
+            const buildingCPLHWithoutSup = buildingHours.find(ele => ele.name === "THROUGHPUT Shift Plan CPLH (excl. Support)").plan
+            const buildingCPLHWithSup = buildingHours.find(ele => ele.name === "THROUGHPUT CPLH (with Support)").plan
+
+            // Indirect Functions
+            const indirectHoursLP = plan.find(ele => ele.title === "Indirect Functions").data
+
+            // Receive Related
+            const receivedDock = indirectHoursLP.find(ele => ele.name === "Receive Dock").subfunctions
+            const ReceiveDockCPLH = receivedDock.find(ele => ele.name === "Receive Dock CPLH").plan
+            const IBLead = indirectHoursLP.find(ele => ele.name === "Inbound Lead/PA").subfunctions
+            const IBLeadCPLH = IBLead.find(ele => ele.name === "IB Lead/PA CPLH").plan
+            const receiveSupport = indirectHoursLP.find(ele => ele.name === "Receive-Support").subfunctions
+            const ReceiveSupportCPLH = receiveSupport.find(ele => ele.name === "Receive Support CPLH").plan
+            const inboundCPLH = inboundHours.find(ele => ele.name === "IB Total Shift Plan CPLH").plan
+            const IBPSIndirect = indirectHoursLP.find(ele => ele.name === "IB Problem Solve").subfunctions
+            const IBPSCPLH = IBPSIndirect.find(ele => ele.name === "IB Problem Solve CPLH").plan
+
+            // Transfer Out Related
+            const TransferOutIndirect = indirectHoursLP.find(ele => ele.name === "Transfer Out").subfunctions
+            const TOCPLH = TransferOutIndirect.find(ele => ele.name === "Transfer Out JPLH").plan
+            const TODIndirect = indirectHoursLP.find(ele => ele.name === "Transfer Out Dock").subfunctions
+            const TODCPLH = TODIndirect.find(ele => ele.name === "Transfer Out Dock JPLH").plan
+
+            const TOLeadIndirect = indirectHoursLP.find(ele => ele.name === "Transfer Out Lead/PA").subfunctions
+            const TOLeadCPLH = TOLeadIndirect.find(ele => ele.name === "TO Lead/PA JPLH").plan
+            const TOPSIndirect = indirectHoursLP.find(ele => ele.name === "Trans Out Prob Solve").subfunctions
+            const TOPSCPLH = TOPSIndirect.find(ele => ele.name === "TO Problem Solve JPLH").plan
+
+            // Sort Related
+            const IndirectSort = indirectHoursLP.find(ele => ele.name === "RC Sort").subfunctions
+            const IndirectSortRate = IndirectSort.find(ele => ele.name === "RC Sort - Total Rate (Direct + Indirect)").plan
+
+            // Flow Path
+            const FlowPath = assumptions.find(ele => ele.name === "Flow Path % - Receive (NVF)").subfunctions
+            const prepPercent = FlowPath.find(ele => ele.name === "Prep - Total").plan
+            const eachPercent = FlowPath.find(ele => ele.name === "Each Receive - Total").plan
+
+            // Direct Functions
+            const direct = plan.find(ele => ele.title === "Direct Functions").data
+
+            // Each Receive
+            const eachReceive = direct.find(ele => ele.name === "Each Receive").subfunctions
+            const eachReceiveVol = eachReceive.find(ele => ele.name === "Each Receive Traditional Units").plan
+            const eachReceiveHours = eachReceive.find(ele => ele.name === "Each Receive Traditional HC").plan
+            const eachReceiveRate = eachReceive.find(ele => ele.name === "Each Receive - Total Rate").plan
+
+            // Prep Related
+            const Prep = direct.find(ele => ele.name === "Prep").subfunctions
+            const prepVol = Prep.find(ele => ele.name === "Prep Recorder - Total Units").plan
+            const prepHours = Prep.find(ele => ele.name === "Prep Recorder - Total HC (Trad. + Pallet & Other)").plan
+            const prepRate = Prep.find(ele => ele.name === "Prep Recorder - Total Rate").plan
+
+            // Outbound and Sort
+            const OBCPLH = daHours.find(ele => ele.name === "DA Total Shift Plan JPLH").plan
+            const TOdirect = direct.find(ele => ele.name === "Transfer Out - Direct").subfunctions
+            const WallBuildRate = TOdirect.find(ele => ele.name === "Fluid Load Rate").plan
+            const SortDirect = direct.find(ele => ele.name === "RC Sort - Direct").subfunctions
+            const DirectSortRate = SortDirect.find(ele => ele.name === "Manual Sort Rate").plan
+
+            return {
+                details: {
+                    date, site, plan_type: planInfo.plan_type, shift: shiftTime
+                },
+                volume: { combinedCartons: parseFloat(combinedCartons), OBJobs: parseFloat(OBJobs), prepPercent, eachPercent, IBDensity, sortPercent },
+                hours: { inboundTotalHours, daTotalHours, supportTotalHours },
+                rates: {
+                    inboundCPLH, buildingCPLHWithoutSup, buildingCPLHWithSup, ReceiveDockCPLH, ReceiveSupportCPLH, IBLeadCPLH,
+                    eachReceiveVol, eachReceiveHours, eachReceiveRate,
+                    prepVol, prepHours, prepRate, OBCPLH, TOCPLH, TODCPLH, TOLeadCPLH, WallBuildRate, IndirectSortRate, DirectSortRate, TOPSCPLH,
+                    RPNVol: eachReceiveVol + prepVol, RPNHours: eachReceiveHours + prepHours, RPNRate: (eachReceiveVol + prepVol) / (eachReceiveHours + prepHours)
+                }
+            }
+        }(),
+
+        // FCLM Pull
+        fetchAndParseFCLMcsv("https://fclm-portal.amazon.com/reports/processPathRollup?_adjustPlanHours=on&" + params.toString()).then(data => {
+            csvToSql(data, "PPR", ["TEXT", "INTEGER", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "INTEGER", "REAL", "REAL", "REAL", "REAL", "REAL", "REAL", "REAL", "REAL", "REAL", "REAL", "REAL"])
+        }),
+
+        // Pull all designated FCLM Codes
+        ...functionRollupCodes.map(code => fetchAndParseFCLMcsv(`https://fclm-portal.amazon.com/reports/functionRollup?processId=${code}&` + params.toString()).then(data => {
+            csvToSql(data, "FCLMProcessData", types)
+        })),
+
+        // TOT
+        fetchAndParseFCLMcsv(`https://fclm-portal.amazon.com/reports/timeOnTask?` + params.toString()).then(data => {
+            csvToSql(data, "TOT", ["INTEGER", "TEXT", "TEXT", "REAL", "REAL", "REAL"])
+        }).catch(err => {
+            console.log("Failed to fetch TOT!")
+            if (debug) console.log(err)
+        }),
+
+        // Roster
+        fetch(`https://fclm-portal.amazon.com/employee/employeeRoster?reportFormat=CSV&warehouseId=${site}&employeeStatusActive=true&_employeeStatusActive=on&_employeeStatusLeaveOfAbsence=on&_employeeStatusExempt=on&employeeTypeAmzn=true&_employeeTypeAmzn=on&employeeTypeTemp=true&_employeeTypeTemp=on&employeeType3Pty=true&_employeeType3Pty=on&Employee+ID=Employee+ID&User+ID=User+ID&Employee+Name=Employee+Name&Badge+Barcode+ID=Badge+Barcode+ID&Department+ID=Department+ID&Employment+Start+Date=Employment+Start+Date&Employment+Type=Employment+Type&Employee+Status=Employee+Status&Management+Area+ID=Management+Area+ID&&Manager+Name=Manager+Name&Temp+Agency+Code=Temp+Agency+Code&submit=true`).then(async function (response) {
+            try {
+                const body = await response.text();
+                if (body.startsWith('<html>')) return
+
+                const data = parseCSV(body);
+
+                const types = ["INTEGER", "TEXT", "TEXT", "INTEGER", "INTEGER", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT"]
+                csvToSql(data, "Roster", types)
+                roster = true;
+            } catch { }
+        }),
+
+        // IGraph Fetches
+        fetchAndParseIGraphCSV(HappyPathCasesURL).then(data => {
+            csvToSql(data, "HappyPathCases", ["TEXT"], "INTEGER")
+        }), fetchAndParseIGraphCSV(ReceivedCartonsURL).then(data => {
+            csvToSql(data, "RecievedCartons", ["TEXT"], "INTEGER")
+        }), fetchAndParseIGraphCSV(totesCreatedURL).then(data => {
+            csvToSql(data, "TotesCreated", ["TEXT"], "INTEGER")
+        })
+    ])
+
+    if (debug) console.timeEnd("fetchting")
+    if (debug) console.log(plan)
+    
+
+    // PPR Data
+    function findPPRRowSQL(rowId, col) {
+        const q = db.prepare(`SELECT "${col}" from PPR where "LineItem Id" = "${rowId}"`)
+        q.step()
+        const out = q.get()
+        q.free()
+        return out[0]
+    }
+
+    if (debug) console.time("Queries")
+
+    const volumeOutQuery = `SELECT "Job Action",
+        SUM(CASE WHEN "Unit Type" = 'Case' THEN "Units" ELSE 0 END) "Cases",
+        SUM(CASE WHEN "Unit Type" = 'Tote' THEN "Units" ELSE 0 END) "Totes",
+        SUM(CASE WHEN "Unit Type" in ('Tote', 'Case') THEN "Units" ELSE 0 END) "Cartons",
+        SUM(CASE WHEN "Unit Type" = 'Pallet' THEN "Units" ELSE 0 END) "Pallets",
+        SUM(CASE WHEN "Unit Type" = 'Each' AND "Job Action" <> "TransshipPalletVerified" THEN "Units" ELSE 0 END) "Units",
+        SUM(Units) Units
+    FROM FCLMProcessData
+    WHERE Size  = 'Total'
+    GROUP BY "Job Action"`
+    const inboundVolumeQuery = `SELECT 
+        "Unit Type", 
+        SUM(Units) "Units"
+    FROM FCLMProcessData
+    WHERE "Size" = 'Total'
+        AND "Process Name" = 'LP-Receive'
+    GROUP BY "Unit Type"`
+    const hoursQuery = `SELECT "Process Name", "Function Name",
+        SUM(ActionHours) Hours
+    FROM (
+        SELECT "Process Name", "Function Name", "Employee Id", MAX("Paid Hours-Total(function,employee)") ActionHours
+        FROM FCLMProcessData
+        GROUP BY "Process Name", "Function Name", "Employee Id"
+    ) h
+    GROUP BY "Process Name", "Function Name"`
+    const HeadcountQuery = `SELECT 
+        IIF(r."Department ID" = 1299070, 'Problem Solve',  d."Department") "Area", 
+        SUM(t."Time On Task") "Time On Task", SUM(t."Total Time") "Total Time", 
+        SUM(t."Total Time" - t."Time On Task") TOT,
+        SUM(o.Overstaff) Overstaff,
+        SUM(o.Appeals) Appeals,
+        COUNT(*) Headcount
+    FROM TOT t
+        LEFT JOIN Roster r ON t."Employee ID" = r."Employee ID"
+        LEFT JOIN DepartmentLookup d ON d."Management Area ID" = r."Management Area ID"
+        LEFT JOIN (
+            SELECT o."Employee ID",
+                SUM(CASE WHEN o."Function Name" = 'NON_FC//Overstaffing' THEN o."Paid Hours-Total(function,employee)" ELSE 0 END) Overstaff,
+                SUM(CASE WHEN o."Function Name" = 'HR_INVESTIG/APPEALS' THEN o."Paid Hours-Total(function,employee)" ELSE 0 END) Appeals
+            FROM FCLMProcessData o
+            GROUP BY o."Employee ID"
+        ) o ON o."Employee Id" = r."Employee Id"
+    WHERE "Area" IS NOT NULL
+    GROUP BY "Area"
+    ORDER BY Headcount DESC`
+    const HappyPathCasesQuery = `Select SUM("Total") Total from HappyPathCases`
+    const RecievedCartonsQuery = `Select SUM("Total") Total from RecievedCartons`
+    const TotesCreatedQuery = `Select SUM("Total") Total from TotesCreated`
+
+    function dumpQueryToObject(query) {
+        let tq = db.prepare(query);
+        let out = [tq.getColumnNames()]
+
+        while (tq.step()) out.push(tq.get())
+        tq.free();
+
+        return toObject(out);
+    }
+
+    const hours = dumpQueryToObject(hoursQuery);
+    const volumeOut = dumpQueryToObject(volumeOutQuery);
+    const InboundUnits = dumpQueryToObject(inboundVolumeQuery);
+    const DepartmentStaffing = roster ? dumpQueryToObject(HeadcountQuery) : {};
+    const HappyPathCases = dumpQueryToObject(HappyPathCasesQuery)[0].Total;
+    const RecievedCartons = dumpQueryToObject(RecievedCartonsQuery)[0].Total;
+    const TotesCreated = dumpQueryToObject(TotesCreatedQuery)[0].Total;
+
+    if (debug) console.timeEnd("Queries")
+
+    //Transfer Out Data
+    function findVolOutRow(name) {
+        return volumeOut.find(ele => ele["Job Action"] === name) ?? {
+            "Job Action": "",
+            "Cartons": 0,
+            "Pallets": 0,
+            "Units": 0
+        }
+    }
+
+    function findTOHoursRow(name) {
+        return hours.filter(ele => ele["Process Name"] === "Transfer Out").find(ele => ele["Function Name"] === name) ?? { Hours: 0 }
+    }
+
+    function findSortHoursRow(name) {
+        return hours.filter(ele => ele["Process Name"] === "RC Sort").find(ele => ele["Function Name"] === name) ?? { Hours: 0 }
+    }
+
+    //Inbound Data
+    function findIBRow(name) {
+        return InboundUnits.find(ele => ele["Unit Type"] === name) ?? {
+            "Job Action": "",
+            "Cartons": 0,
+            "Pallets": 0,
+            "Units": 0
+        }
+    }
+
+    // PPR
+    const unitsOut = findPPRRowSQL("ppr.rcSummary.delayedAllocation", "Actual Volume")
+    const prepUnits = findPPRRowSQL("ppr.detail.inbound.ibPrep.ibPrep.total", "Actual Volume")
+    const eachUnits = findPPRRowSQL("ppr.detail.inbound.receive.eachReceive.total", "Actual Volume")
+    const prepHours = findPPRRowSQL("ppr.detail.inbound.ibPrep.ibPrep.total", "Actual Hours")
+    const eachHours = findPPRRowSQL("ppr.detail.inbound.receive.eachReceive.total", "Actual Hours")
+    const unitsIn = findPPRRowSQL("ppr.rcSummary.inbound", "Actual Volume")
+    const sortUnits = findPPRRowSQL("ppr.detail.da.rcSort.rcSort.total", "Actual Volume")
+    const inboundHours = findPPRRowSQL("ppr.rcSummary.inbound", "Actual Hours")
+    const siteHours = findPPRRowSQL("ppr.fcSummary.throughput", "Actual Hours")
+    const totalSiteTOT = findPPRRowSQL("ppr.fcSummary.timeOffTask", "Actual Hours")
+    const receiveDockHours = findPPRRowSQL("ppr.detail.inbound.receive.receiveDock", "Actual Hours")
+    const receiveSupportHours = findPPRRowSQL("ppr.detail.inbound.receive.receiveSupport", "Actual Hours")
+
+    // Inbound
+    const FCLMcartonsIn = findIBRow("Case")["Units"]
+    const FCLMUnitsIn = findIBRow("EACH")["Units"]
+    const IBCartonDensity = FCLMUnitsIn / FCLMcartonsIn
+    const IBLeadHours = hours.filter(ele => ele["Process Name"] === "Inbound Lead/PA").reduce((p, v) => p + v.Hours, 0)
+
+
+    // Transfer Out
+    const totesToPalletUnits = findVolOutRow("ScanToteToPallet")["Units"]
+    const casesToPalletUnits = findVolOutRow("ScanCaseToPallet")["Units"]
+    const wallBuildHours = findTOHoursRow("Wall Builder")["Hours"]
+    const toteScanHours = findTOHoursRow("Fluid Load - Tote")["Hours"]
+    const caseScanHours = findTOHoursRow("Fluid Load - Case")["Hours"]
+    const TODockHours = hours.filter(ele => ele["Process Name"] === "Transfer Out Dock").reduce((p, v) => p + v.Hours, 0)
+    const TOLeadHours = hours.filter(ele => ele["Process Name"] === "Transfer Out Lead/PA").reduce((p, v) => p + v.Hours, 0)
+    const TOPSHours = hours.filter(ele => ele["Process Name"] === "Trans Out Prob Solve").reduce((p, v) => p + v.Hours, 0)
+    const OBCPLHCartons = findVolOutRow("FluidLoadTote")["Cartons"] + findVolOutRow("FluidLoadCase")["Cartons"] + findVolOutRow("ScanToteToPallet")["Cartons"] + findVolOutRow("ScanCaseToPallet")["Cartons"] + findVolOutRow("TransshipPalletVerified")["Cartons"]
+    const outboundHours = findPPRRowSQL("ppr.rcSummary.delayedAllocation", "Actual Hours")
+    const transferOutHours = findPPRRowSQL("ppr.detail.da.transferOut.transferOut", "Actual Hours")
+    const sortIndirectHours = findPPRRowSQL("ppr.detail.da.rcSort.rcSort.total", "Actual Hours")
+    const sortDirectHours = findSortHoursRow("RC Sort Primary")["Hours"]
+    const wallBuildRateVolume = findVolOutRow("FluidLoadCase")["Cartons"] + findVolOutRow("FluidLoadTote")["Cartons"]
+    const wallBuildRateHours = wallBuildHours + toteScanHours + caseScanHours
+
+    // Calculations
+    const toteUnitsOut = findVolOutRow("FluidLoadTote")["Units"] + findVolOutRow("ScanToteToPallet")["Units"]
+    const toteDensity = toteUnitsOut / (findVolOutRow("ScanToteToPallet")["Cartons"] + findVolOutRow("FluidLoadTote")["Cartons"])
+
+    // Create the table
+    let timestamp = document.getElementById("timestamps");
+    if (!timestamp) timestamp = document.getElementById("control-panel")
+
+    function fmtVal(i) {
+        if (typeof i === "number") return i.toLocaleString(undefined, { maximumFractionDigits: 1 })
+        return i;
+    }
+
+    function createTable(id, data, parentElement, options) {
+        const table = document.createElement('table');
+        table.id = id;
+        table.className = 'result-table';
+        table.style.margin = "-1px";
+
+        const tbody = document.createElement('tbody');
+
+        // Create Rows
+        data.forEach((ele, row, l) => {
+            const tbodyRow = document.createElement('tr');
+            tbodyRow.className = 'lineItem bRow';
+            if ((row % 2)) {
+                tbodyRow.className += " even"
+            } else {
+                tbodyRow.className += " odd"
+            }
+
+            ele.forEach((ele, col) => {
+                const td = row === 0 ? document.createElement('th') : document.createElement('td');
+                if (row === 0) {
+                    td.className = 'uph bLabel ';
+                } else if (col === 0) {
+                    td.className = 'header bLabel ';
+                }
+                td.className += 'size-total numeric bItem';
+
+                switch (typeof ele) {
+                    case 'number':
+                    case 'string':
+                        td.textContent = ele;
+                        break;
+                    case 'undefined':
+                        break;
+                    default:
+                        if (ele.text) td.textContent = fmtVal(ele.text);
+                        if (ele.element) td.append(ele.element)
+                        if (ele.classes) td.classList.add(...ele.classes)
+                        if (ele.id) td.id = ele.id
+                        if (ele.width) td.colSpan = ele.width;
+                        if (ele.height) td.rowSpan = ele.height;
+                        if (ele.styles) {
+                            for (const [key, value] of Object.entries(ele.styles)) {
+                                td.style[key] = value
+                            }
+                        }
+                        break;
+                }
+                tbodyRow.appendChild(td);
+            })
+
+            if (row === 0) {
+                const thead = document.createElement('thead');
+                thead.append(tbodyRow);
+                table.appendChild(thead);
+            } else tbody.appendChild(tbodyRow);
+        })
+
+        table.appendChild(tbody);
+
+        let header = document.createElement('h3');
+        header.textContent = id;
+        const div = document.createElement('div');
+        div.className = "bTable";
+
+        div.appendChild(header);
+        div.appendChild(table);
+        if (options && options.footer) {
+            const footer = document.createElement("span")
+            footer.innerText = options.footer
+            footer.className = "tableFootNote"
+
+            div.appendChild(footer);
+        }
+        parentElement.appendChild(div);
+    }
+
+    function createDeltaElement(data, value = data) {
+        return {
+            text: fmtVal(data),
+            classes: [parseFloat(value) >= 0 ? 'delta-success' : 'delta-danger']
+        }
+    }
+
+    function addClassToDelta() {
+        if (!(dateSpan === "Intraday" || dateSpan === "Day" || dateSpan === null)) return;
+        document.querySelectorAll('.delta-success').forEach(ele => ele.classList.add('highlight-success'))
+        document.querySelectorAll('.delta-danger').forEach(ele => ele.classList.add('highlight-danger'))
+    }
+
+    function removeClassFromDelta() {
+        document.querySelectorAll('.delta-success').forEach(ele => ele.classList.remove('highlight-success'))
+        document.querySelectorAll('.delta-danger').forEach(ele => ele.classList.remove('highlight-danger'))
+    }
+
+
+    // classes: [parseFloat(value) >= 0 ? 'highlight-success' : 'highlight-danger']
+
+    function mapToDeltaRow(data) {
+        return data.map(ele => (
+            createDeltaElement(ele)
+        ))
+    }
+    let planString = "<div></div>"
+    if (plan) {
+        planString = `<p>Plan: ${plan.details.date} ${plan.details.plan_type.toUpperCase()} ${plan.details.shift.charAt(0).toUpperCase() + plan.details.shift.slice(1)}</p>`
+    }
+
+    // Create the parent div
+    let parentDiv = document.createElement('div');
+    parentDiv.classList.add("parentDiv");
+    const headerDiv = document.createElement('div');
+    headerDiv.innerHTML = `<section class="headerDiv">
+        <div class="headerSection">
+            <div></div>
+            <h1>${site} nIXD Metrics</h1>
+            ${planString}
+        </div>
+    </section>`
+
+    parentDiv.appendChild(headerDiv.firstChild);
+
+    function createChild(id) {
+        let div = document.createElement('div');
+        div.classList.add("section")
+        div.id = id;
+
+        let header = document.createElement('caption');
+        header.classList.add("section-header")
+        header.textContent = id;
+
+        parentDiv.appendChild(header);
+        parentDiv.appendChild(div);
+
+        return div;
+    }
+
+    // Create the first child div with id 'inbound'
+    const siteDiv = createChild("Site")
+    const inboundDiv = createChild("Inbound")
+    const outboundDiv = createChild("Outbound")
+
+    headerDiv.innerHTML = `<section class="parentFooter">
+        <div class="footerSection">
+            <sub><a href="https://w.amazon.com/bin/view/NIXDSummaryTamperMonkey/">Calculation Information</a></sub>
+            <sub><a href="https://axzile.corp.amazon.com/-/carthamus/script/ppr-1to1">Download</a></sub>
+        </div>
+        <div class="footerSection">
+            <div id="versionConatiner">
+                <p>v${GLOBALS.VERSION}</p>
+            </div>
+            <sub>by <a href="https://phonetool.amazon.com/users/bbunks">bbunks@</a></sub>
+        </div>
+    </section>`
+
+    parentDiv.appendChild(headerDiv.firstChild);
+
+    timestamp.insertAdjacentElement("afterend", parentDiv);
+
+    function s(p, ...v) {
+        if (p) return v
+        return []
+    }
+
+    function sp(...v) {
+        return s(plan, ...v)
+    }
+
+    let stateStore = JSON.parse(localStorage.getItem("collapseState") ?? "{}")
+    css.innerHTML += `
+.collapseButton {
+	height: 1rem;
+	width: 1rem;
+	display: inline-flex;
+	justify-content: center;
+	align-items: center;
+	border: none;
+	border-radius: 4px;
+	margin: 2px;
+	font-family: Verdana;
+	font-size: .75rem;
+}`
+
+    function createCollapseableClass(name) {
+
+        if (typeof stateStore[name] === 'undefined') stateStore[name] = true;
+
+        const button = document.createElement("button")
+        button.classList.add("collapseButton")
+        button.textContent = stateStore[name] ? "+" : "-"
+
+        const collapseClass = "col__" + (name.replaceAll(" ", ""))
+        const expandedClass = "exp__" + (name.replaceAll(" ", ""))
+
+        button.onclick = () => {
+            stateStore[name] = !stateStore[name]
+            button.textContent = stateStore[name] ? "+" : "-"
+            document.querySelectorAll("." + ((!stateStore[name]) ? collapseClass : expandedClass)).forEach(element => {
+                element.classList.remove((!stateStore[name]) ? collapseClass : expandedClass);
+                element.classList.add(stateStore[name] ? collapseClass : expandedClass);
+            });
+            localStorage.setItem("collapseState", JSON.stringify(stateStore))
+        }
+
+        css.innerHTML += `.${collapseClass} {
+    display: none
+}
+`
+        const currentClass = stateStore[name] ? collapseClass : expandedClass
+        return {
+            button,
+            currentClass,
+            wrapText(text) {
+                return {
+                    text: fmtVal(text), classes: [currentClass]
+                }
+            },
+            wrapHeader(text) {
+                const div = document.createElement('div')
+                div.style.display = "flex"
+                div.style.alignItems = 'center'
+                div.style.justifyContent = 'space-between'
+                div.style.gap = '.25rem'
+                div.style.marginLeft = '-.25rem'
+                div.appendChild(button)
+                div.insertAdjacentHTML('beforeend', text)
+
+                return {
+                    element: div
+                }
+            }
+        }
+    }
+
+    // INBOUND
+    // if (!plan) return
+    function createRateRow(label, vol, hours, planRate, hideFunction = e => e) {
+        const delta = hours - (vol / planRate)
+        const rate = vol / hours
+        return [label, hideFunction(vol), hideFunction(hours), createDeltaElement(rate, parseFloat(delta) * -1), ...sp(planRate, hideFunction(delta))].map(fmtVal)
+    }
+
+    const siteRatesCol = createCollapseableClass("siterates")
+    const sbw = siteRatesCol.wrapText
+
+    createTable("Site Rates", [
+        ["Metric", sbw("Volume"), sbw("Hours"), siteRatesCol.wrapHeader("Value"), ...sp("Plan", sbw("Δ"))],
+        createRateRow("CPLH", RecievedCartons + OBCPLHCartons, inboundHours + outboundHours + totalSiteTOT, plan?.rates?.buildingCPLHWithoutSup, sbw),
+        createRateRow("CPLH w/ Supp", RecievedCartons + OBCPLHCartons, siteHours, plan?.rates?.buildingCPLHWithSup, sbw),
+        ["IB Cartons", sbw("-"), sbw("-"), fmtVal(RecievedCartons ?? 0), ...sp(fmtVal(parseFloat(plan?.volume?.combinedCartons)), sbw(RecievedCartons - plan?.volume?.combinedCartons))],
+        ["OB Cartons", sbw("-"), sbw("-"), fmtVal(OBCPLHCartons), ...sp(fmtVal(Math.floor(parseFloat(plan?.volume?.OBJobs))), sbw(OBCPLHCartons - Math.floor(parseFloat(plan?.volume?.OBJobs))))]
+    ], siteDiv)
+
+    if (roster) {
+        const showOS = DepartmentStaffing.reduce((p, c) => c.Overstaff + p, 0) > 0
+        const showAppeals = DepartmentStaffing.reduce((p, c) => c.Appeals + p, 0) > 0
+
+        createTable("Headcount", [
+            ["Department", "Headcount", "TOT", ...s(showOS, "Overstaff"), ...s(showAppeals, "Appeals")],
+            ...DepartmentStaffing.map(ele => [ele["Area"], ele.Headcount ?? 0, ele.TOT ?? 0, ...s(showOS, ele.Overstaff ?? 0), ...s(showAppeals, ele.Appeals ?? 0)].map(fmtVal))
+        ], siteDiv)
+    }
+
+    const ibRatesCol = createCollapseableClass("ibrates")
+    const ibw = ibRatesCol.wrapText
+    // if (!plan) return
+
+    // INBOUND
+    function createIBRateRow(label, vol, hours, planRate) {
+        return createRateRow(label, vol, hours, planRate, ibw)
+    }
+
+    createTable("IB Rates", [
+        ["", ibw("Volume"), ibw("Hours"), ibRatesCol.wrapHeader("Rate"), ...sp("Plan", ibw("Hrs Δ"))],
+        createIBRateRow("IB CPLH", RecievedCartons, inboundHours, plan?.rates?.inboundCPLH),
+        createIBRateRow("IB Lead CPLH", RecievedCartons, IBLeadHours, plan?.rates?.IBLeadCPLH),
+        [{ text: "Dock", width: 6, classes: ["divider"] }],
+        createIBRateRow("Receive Dock CPLH", RecievedCartons, receiveDockHours, plan?.rates?.ReceiveDockCPLH),
+        createIBRateRow("Receive Support CPLH", RecievedCartons, receiveSupportHours, plan?.rates?.ReceiveSupportCPLH),
+        [{ text: "RPN", width: 6, classes: ["divider"] }],
+        createIBRateRow("Prep - Direct", prepUnits, prepHours, plan?.rates?.prepRate),
+        createIBRateRow("Each - Direct", eachUnits, eachHours, plan?.rates?.eachReceiveRate),
+        createIBRateRow("RPN - Direct", eachUnits + prepUnits, eachHours + prepHours, plan?.rates?.RPNRate)
+    ], inboundDiv)
+
+    createTable("IB Metrics", [
+        ["Metric", "Value", ...sp("Plan")],
+        ["IB Carton Density", IBCartonDensity, ...sp(plan?.volume?.IBDensity)],
+        ["Created Tote Density", toteDensity, ...sp("-")],
+        ["Prep %", fmtVal(prepUnits * 100 / unitsIn) + "%", ...sp(fmtVal(plan?.volume?.prepPercent * 100) + "%")],
+        ["Each %", fmtVal(eachUnits * 100 / unitsIn) + "%", ...sp(fmtVal(plan?.volume?.eachPercent * 100) + "%")],
+    ].map(l => l.map(fmtVal)), inboundDiv)
+
+    // Outbound
+    const obRatesCol = createCollapseableClass("obrates")
+    const obw = obRatesCol.wrapText
+
+    function createOBRateRow(label, vol, hours, planRate) {
+        return createRateRow(label, vol, hours, planRate, obw)
+    }
+
+    createTable("OB Rates", [
+        ["", obw("Volume"), obw("Hours"), obRatesCol.wrapHeader("Rate"), ...sp("Plan", obw("Hrs Δ"))],
+        createOBRateRow("OB CPLH", OBCPLHCartons, outboundHours, plan?.rates?.OBCPLH),
+        createOBRateRow("OB Lead/PA", OBCPLHCartons, TOLeadHours, plan?.rates?.TOLeadCPLH),
+        [{ text: "Transfer Out", width: 7, classes: ["divider"] }],
+        createOBRateRow("TO CPLH", OBCPLHCartons, transferOutHours, plan?.rates?.TOCPLH),
+        createOBRateRow("TO Dock CPLH", OBCPLHCartons, TODockHours, plan?.rates?.TODCPLH),
+        createOBRateRow("Wall Build", wallBuildRateVolume, wallBuildRateHours, plan?.rates?.WallBuildRate),
+        [{ text: "Sort", width: 7, classes: ["divider"] }],
+        createOBRateRow("Sort - Direct", sortUnits, sortDirectHours, plan?.rates?.DirectSortRate),
+        createOBRateRow("Sort - Total", sortUnits, sortIndirectHours, plan?.rates?.IndirectSortRate),
+        [{ text: "Problem Solve", width: 7, classes: ["divider"] }],
+        createOBRateRow("OB Problem Solve", OBCPLHCartons, TOPSHours, plan?.rates?.TOPSCPLH)
+    ], outboundDiv)
+
+    const palletsCreated = Math.floor(findVolOutRow("ScanToteToPallet")["Cartons"] / 27);
+
+    createTable("Transfer Out 1:1", [
+        ["", "Cases", "Totes", "Pallets", "Units"],
+        [{ text: "Produced", width: 5, classes: ["divider"] }],
+        ["Created", HappyPathCases, TotesCreated, palletsCreated, unitsIn].map(fmtVal),
+        [{ text: "Consumed", width: 5, classes: ["divider"] }],
+        ["Palletized", findVolOutRow("ScanCaseToPallet")["Cartons"] + findVolOutRow("TransshipPalletVerified")["Cartons"], findVolOutRow("ScanToteToPallet")["Cartons"], '-', totesToPalletUnits + casesToPalletUnits].map(fmtVal),
+        ["Loaded", findVolOutRow("FluidLoadCase")["Cartons"], findVolOutRow("FluidLoadTote")["Cartons"], findVolOutRow("PalletLoaded")["Pallets"], unitsOut].map(fmtVal),
+        [{ text: "Delta", width: 5, classes: ["divider"] }],
+        ["Delta", ...mapToDeltaRow([(findVolOutRow("ScanCaseToPallet")["Cartons"] + findVolOutRow("FluidLoadCase")["Cartons"] + findVolOutRow("TransfershipPalletVerified")["Cartons"]) - HappyPathCases, ((findVolOutRow("ScanToteToPallet")["Cartons"] + findVolOutRow("FluidLoadTote")["Cartons"]) - TotesCreated).toFixed(0), findVolOutRow("PalletLoaded")["Pallets"] - palletsCreated, unitsOut - unitsIn])]
+    ], outboundDiv, {
+        footer: "*Pallets loaded can not account for the merge container method"
+    })
+
+    let sortGoalPercent = ((plan?.volume?.sortPercent) ?? .24) * 100
+    const sortGoalInput = document.createElement("input")
+    sortGoalInput.classList.add('goalInput')
+    sortGoalInput.value = sortGoalPercent
+    sortGoalInput.addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+            sortGoalInput.blur();
+        }
+    })
+    const inboundUnitsLabel = document.createElement("span")
+    const deltaUnits = document.createElement("span")
+    const deltaPercent = document.createElement("span")
+    const inputDiv = document.createElement('div')
+    inputDiv.append(sortGoalInput)
+    inputDiv.append("%")
+    inputDiv.className = "sortGoalUnits"
+
+    function updateDeltaClasses(id, value) {
+        if (value >= 0) {
+            document.getElementById(id)?.classList.remove("highlight-danger")
+            document.getElementById(id)?.classList.add("highlight-success")
+        } else {
+            document.getElementById(id)?.classList.add("highlight-danger")
+            document.getElementById(id)?.classList.remove("highlight-success")
+        }
+
+    }
+
+    function removeDeltaClasses() {
+        document.getElementById("sortDelta")?.classList.remove("highlight-success")
+        document.getElementById("sortDelta")?.classList.remove("highlight-danger")
+        document.getElementById("sortPercentDelta")?.classList.remove("highlight-success")
+        document.getElementById("sortPercentDelta")?.classList.remove("highlight-danger")
+    }
+
+    let sortDelta, sortDeltaP;
+
+    function updateSortGoalPercent(goalText) {
+        let goal = parseFloat(goalText)
+        if (isNaN(goal)) {
+            goal = 24
+            //console.error("Not a number")
+        }
+        inboundUnitsLabel.textContent = fmtVal(Math.round(unitsIn * goal / 100))
+        sortDelta = sortUnits - Math.round(unitsIn * goal / 100)
+        sortDeltaP = sortUnits * 100 / unitsIn - goal
+        deltaUnits.textContent = fmtVal(sortDelta)
+        deltaPercent.textContent = fmtVal(sortDeltaP) + "%"
+        updateDeltaClasses("sortDelta", sortDelta)
+        updateDeltaClasses("sortPercentDelta", sortDeltaP)
+        localStorage.setItem("sortGoalPercent", goal)
+    }
+
+    updateSortGoalPercent(sortGoalPercent)
+    sortGoalInput.onblur = e => updateSortGoalPercent(sortGoalInput.value)
+
+    createTable("Sort 1:1", [
+        ["", "Units", "Percent"],
+        ["Goal", { element: inboundUnitsLabel }, { element: inputDiv, style: { padding: 0 } }],
+        ["Actual", fmtVal(sortUnits), fmtVal(sortUnits * 100 / unitsIn) + "%"],
+        ["Delta",
+            {
+                id: "sortDelta", element: deltaUnits, classes:
+                    s(document.getElementById('ppr-color-coding').checked,
+                        (sortUnits - Math.round(unitsIn * sortGoalPercent / 100)) >= 0
+                            ? 'highlight-success' : 'highlight-danger')
+            }, {
+                id: "sortPercentDelta", element: deltaPercent, classes:
+                    s(document.getElementById('ppr-color-coding').checked,
+                        ((sortUnits * 100 / unitsIn - sortGoalPercent) >= 0
+                            ? 'highlight-success' : 'highlight-danger'))
+            }
+        ]
+    ], outboundDiv)
+
+    if (document.getElementById('ppr-color-coding').checked) {
+        addClassToDelta();
+    }
+
+    document.getElementById('ppr-color-coding').addEventListener('change', e => {
+        console.log(e)
+        if (e.target.checked) {
+            addClassToDelta();
+            updateDeltaClasses("sortDelta", sortDelta);
+            updateDeltaClasses("sortPercentDelta", sortDeltaP);
+        } else {
+            // rates
+            removeClassFromDelta();
+            // sort...
+            removeDeltaClasses();
+        }
+    })
+
+    if (!debug) {
+        db.close()
+    }
+
+    const today = new Date();
+    if (localStorage.getItem("nextUpdateTime") === null) localStorage.setItem("nextUpdateTime", today.toISOString())
+    const nextUpdateTimeString = localStorage.getItem("nextUpdateTime")
+
+    if (localStorage.getItem("remoteVersion") === null) localStorage.setItem("remoteVersion", GLOBALS.VERSION)
+    const cachedRemoteVersion = localStorage.getItem("remoteVersion")
+
+    const nextUpdateTime = new Date(nextUpdateTimeString);
+
+    function showUpdate() {
+        document.getElementById("versionConatiner").innerHTML += `<a href="https://axzile.corp.amazon.com/-/carthamus/download_script/ppr-1to1.user.js"><div style="background: white;color: #55F;height: 1rem;border-radius: 1rem;font-size: .75rem;font-weight: bolder;padding: 0 .5rem;">↑ Update</div></a>`
+    }
+
+    if (parseFloat(cachedRemoteVersion) > parseFloat(GLOBALS.VERSION)) {
+        showUpdate()
+    } else if (nextUpdateTime <= today) {
+        console.log("Checking for update!")
+        gmFetch("https://axzile.corp.amazon.com/-/carthamus/download_script/ppr-1to1.user.js").then(res => {
+            const versionNumber = parseFloat(res.responseText.split('\n')[2].substring(15).trim());
+            if (versionNumber > parseFloat(GLOBALS.VERSION)) {
+                localStorage.setItem("remoteVersion", versionNumber.toString())
+                showUpdate();
+            }
+            today.setDate(today.getDate() + 1)
+            localStorage.setItem("nextUpdateTime", today.toISOString())
+        })
+    }
+})();
