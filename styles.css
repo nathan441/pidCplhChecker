@@ -1,0 +1,53 @@
+@keyframes glow {
+    0% {
+        box-shadow:  0 0 5px rgb(247, 239, 128), 0 0 5px rgb(188, 252, 13);
+    }
+    50% {
+        box-shadow:  0 0 20px rgb(247, 239, 128), 0 0 20px rgb(188, 252, 13);
+    }
+    100% {
+        box-shadow:  0 0 5px rgb(247, 239, 128), 0 0 5px rgb(188, 252, 13);
+    }
+}
+
+button{
+    padding: 1em 2em;
+    background-color: #0f0f0f;
+    border: none;
+    color: #ffffff;
+    border-radius: 1000px;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+button::after{
+    content : '';
+    position: absolute;
+    height: 107%;
+    width: 102%;
+    border-radius: 100px;
+    background-color: red;
+    background-image: linear-gradient(to bottom right, rgb(188, 252, 13), purple);
+    z-index: -1;
+}
+
+button:hover{
+    z-index:0;
+    animation: glow 1s infinite;
+    box-shadow:  7px 0 7px rgb(247, 239, 128), -7px 0 7px rgb(188, 252, 13);
+}
+
+/* Center and space the shift buttons */
+.button-row{
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin: 16px 0;
+}
+
+.button-row button{
+    min-width: 120px;
+}
